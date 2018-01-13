@@ -298,7 +298,7 @@
 
 	ethernet: ethernet@1e100000 {
 		compatible = "mediatek,mt7621-eth";
-		reg = <0x1e100000 0x10000>;
+		reg = <0x1e100000 0x10000 0x1e110000 0x8000>;
 
 		#address-cells = <1>;
 		#size-cells = <0>;

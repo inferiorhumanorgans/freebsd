@@ -209,6 +209,11 @@ struct rt_softc
 	bus_space_tag_t	 bst;
 	bus_space_handle_t bsh;
 
+	int		 gsw_mem_rid;
+	struct resource	*gsw_mem;
+	bus_space_tag_t	 gsw_bst;
+	bus_space_handle_t gsw_bsh;
+
 	struct ifnet	*ifp;
 	int 		 if_flags;
 	struct ifmedia	 rt_ifmedia;

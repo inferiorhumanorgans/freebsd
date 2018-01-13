@@ -91,6 +91,8 @@ __FBSDID("$FreeBSD$");
 
 #define	RT_TX_WATCHDOG_TIMEOUT		5
 
+#define	RT_TX_QLEN	256
+
 #define RT_CHIPID_RT3050 0x3050
 #define RT_CHIPID_RT5350 0x5350
 #define RT_CHIPID_MT7620 0x7620
@@ -182,6 +184,7 @@ SYSCTL_INT(_hw_rt, OID_AUTO, debug, CTLFLAG_RWTUN, &rt_debug, 0,
 static int
 rt_probe(device_t dev)
 {
+	device_printf(dev, "rt_probe\n");
 	struct rt_softc *sc = device_get_softc(dev);
 	char buf[80];
 #ifdef FDT
@@ -361,6 +364,20 @@ rt_attach(device_t dev)
 	sc->bst = rman_get_bustag(sc->mem);
 	sc->bsh = rman_get_bushandle(sc->mem);
 
+	/* Grab the Gigabit Switch memory too since we're aiming to treat it like
+	   a fancy multiport NIC in conjunction with the frame engine */
+	sc->gsw_mem_rid = 1;
+	sc->gsw_mem = bus_alloc_resource_any(dev, SYS_RES_MEMORY, &sc->gsw_mem_rid,
+	    RF_ACTIVE);
+	if (sc->gsw_mem == NULL) {
+		device_printf(dev, "could not allocate memory resource for GSW \n");
+		error = ENXIO;
+		goto fail;
+	}
+
+	sc->gsw_bst = rman_get_bustag(sc->gsw_mem);
+	sc->gsw_bsh = rman_get_bushandle(sc->gsw_mem);
+
 	sc->irq_rid = 0;
 	sc->irq = bus_alloc_resource_any(dev, SYS_RES_IRQ, &sc->irq_rid,
 	    RF_ACTIVE);
@@ -493,26 +510,33 @@ rt_attach(device_t dev)
 		goto fail;
 	}
 
-	ifp->if_softc = sc;
 	if_initname(ifp, device_get_name(sc->dev), device_get_unit(sc->dev));
-	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
-	ifp->if_init = rt_init;
-	ifp->if_ioctl = rt_ioctl;
-	ifp->if_start = rt_start;
-#define	RT_TX_QLEN	256
+	if_setdev(ifp, dev);
+	if_setinitfn(ifp, rt_init);
+	if_setsoftc(ifp, sc);
+	if_setflags(ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST);
+	if_setioctlfn(ifp, rt_ioctl);
+	if_setstartfn(ifp, rt_start);
+        if_setcapabilities(ifp, 0);
+        if_setcapenable(ifp, 0);
 
 	IFQ_SET_MAXLEN(&ifp->if_snd, RT_TX_QLEN);
 	ifp->if_snd.ifq_drv_maxlen = RT_TX_QLEN;
 	IFQ_SET_READY(&ifp->if_snd);
 
 #ifdef IF_RT_PHY_SUPPORT
-	error = mii_attach(dev, &sc->rt_miibus, ifp, rt_ifmedia_upd,
-	    rt_ifmedia_sts, BMSR_DEFCAPMASK, MII_PHY_ANY, MII_OFFSET_ANY, 0);
+	for (int port=0; port < 6; port++) {
+		device_printf(dev, "Port %d status is: %x\n", port, RT_GSW_READ(sc, (0x3008 + (0x100 * port))));
+	}
+	device_printf(dev, "Attempting to attach MII\n");
+	error = mii_attach(sc->dev, &sc->rt_miibus, ifp, rt_ifmedia_upd,
+	    rt_ifmedia_sts, BMSR_DEFCAPMASK, 0, MII_OFFSET_ANY, 0);
 	if (error != 0) {
 		device_printf(dev, "attaching PHYs failed\n");
 		error = ENXIO;
 		goto fail;
 	}
+	device_printf(dev, "Attached PHYs\n");
 #else
 	ifmedia_init(&sc->rt_ifmedia, 0, rt_ifmedia_upd, rt_ifmedia_sts);
 	ifmedia_add(&sc->rt_ifmedia, IFM_ETHER | IFM_100_TX | IFM_FDX, 0,
@@ -578,6 +602,10 @@ fail:
 	if (sc->mem != NULL)
 		bus_release_resource(dev, SYS_RES_MEMORY, sc->mem_rid,
 		    sc->mem);
+
+	if (sc->gsw_mem != NULL)
+		bus_release_resource(dev, SYS_RES_MEMORY, sc->gsw_mem_rid,
+		    sc->gsw_mem);
 
 	if (sc->irq != NULL)
 		bus_release_resource(dev, SYS_RES_IRQ, sc->irq_rid,
@@ -651,8 +679,6 @@ rt_ifmedia_sts(struct ifnet *ifp, struct ifmediareq *ifmr)
 	mii_pollstat(mii);
 	ifmr->ifm_active = mii->mii_media_active;
 	ifmr->ifm_status = mii->mii_media_status;
-	ifmr->ifm_active = IFM_ETHER | IFM_100_TX | IFM_FDX;
-	ifmr->ifm_status = IFM_AVALID | IFM_ACTIVE;
 	RT_SOFTC_UNLOCK(sc);
 #else /* !IF_RT_PHY_SUPPORT */
 
@@ -1235,6 +1261,8 @@ rt_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 
 	sc = ifp->if_softc;
 	ifr = (struct ifreq *) data;
+
+	//device_printf(sc->dev, "Recv IOCTL %lx\n", cmd);
 
 	error = 0;
 
@@ -2753,14 +2781,16 @@ rt_miibus_readreg(device_t dev, int phy, int reg)
 	}
 
 	/* Wait prev command done if any */
-	while (RT_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
-	RT_WRITE(sc, MDIO_ACCESS,
-	    MDIO_CMD_ONGO ||
-	    ((phy << MDIO_PHY_ADDR_SHIFT) & MDIO_PHY_ADDR_MASK) ||
-	    ((reg << MDIO_PHYREG_ADDR_SHIFT) & MDIO_PHYREG_ADDR_MASK));
-	while (RT_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
+	while (RT_GSW_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
+	RT_GSW_WRITE(sc, MDIO_ACCESS,
+	    MDIO_CMD_ONGO | MDIO_CMD_START | MDIO_CMD_RD |
+	    (phy << MDIO_PHY_ADDR_SHIFT) |
+	    (reg << MDIO_PHYREG_ADDR_SHIFT));
+	while (RT_GSW_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
 
-	return (RT_READ(sc, MDIO_ACCESS) & MDIO_PHY_DATA_MASK);
+	int retval = (RT_GSW_READ(sc, MDIO_ACCESS) & MDIO_PHY_DATA_MASK);
+	RT_DPRINTF(sc, RT_DEBUG_ANY, "mii_readreg %x, %x = %x\n", phy, reg, retval);
+	return retval;
 }
 
 static int
@@ -2768,14 +2798,16 @@ rt_miibus_writereg(device_t dev, int phy, int reg, int val)
 {
 	struct rt_softc *sc = device_get_softc(dev);
 
+	RT_DPRINTF(sc, RT_DEBUG_ANY, "mii_writereg %x, %x, %x\n", phy, reg, val);
+
 	/* Wait prev command done if any */
-	while (RT_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
-	RT_WRITE(sc, MDIO_ACCESS,
-	    MDIO_CMD_ONGO || MDIO_CMD_WR ||
-	    ((phy << MDIO_PHY_ADDR_SHIFT) & MDIO_PHY_ADDR_MASK) ||
-	    ((reg << MDIO_PHYREG_ADDR_SHIFT) & MDIO_PHYREG_ADDR_MASK) ||
+	while (RT_GSW_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
+	RT_GSW_WRITE(sc, MDIO_ACCESS,
+	    MDIO_CMD_ONGO | MDIO_CMD_WR |
+	    ((phy << MDIO_PHY_ADDR_SHIFT) & MDIO_PHY_ADDR_MASK) |
+	    ((reg << MDIO_PHYREG_ADDR_SHIFT) & MDIO_PHYREG_ADDR_MASK) |
 	    (val & MDIO_PHY_DATA_MASK));
-	while (RT_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
+	while (RT_GSW_READ(sc, MDIO_ACCESS) & MDIO_CMD_ONGO);
 
 	return (0);
 }
@@ -2793,10 +2825,12 @@ rt_miibus_statchg(device_t dev)
 		switch (IFM_SUBTYPE(mii->mii_media_active)) {
 		case IFM_10_T:
 		case IFM_100_TX:
+		case IFM_1000_T:
 			/* XXX check link here */
 			sc->flags |= 1;
 			break;
 		default:
+			device_printf(dev, "Got invalid media type: %x\n", mii->mii_media_active);
 			break;
 		}
 	}
@@ -2835,6 +2869,7 @@ DRIVER_MODULE(rt, nexus, rt_driver, rt_dev_class, 0, 0);
 #ifdef FDT
 DRIVER_MODULE(rt, simplebus, rt_driver, rt_dev_class, 0, 0);
 #endif
+DRIVER_MODULE(miibus, rt, miibus_driver, miibus_devclass, 0, 0);
 
 MODULE_DEPEND(rt, ether, 1, 1, 1);
 MODULE_DEPEND(rt, miibus, 1, 1, 1);

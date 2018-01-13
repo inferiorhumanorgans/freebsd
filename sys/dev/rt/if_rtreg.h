@@ -36,19 +36,27 @@
 #define	RT_WRITE(sc, reg, val)				\
 	bus_space_write_4((sc)->bst, (sc)->bsh, reg, val)
 
+#define	RT_GSW_READ(sc, reg)				\
+	bus_space_read_4((sc)->gsw_bst, (sc)->gsw_bsh, reg)
+
+#define	RT_GSW_WRITE(sc, reg, val)				\
+	bus_space_write_4((sc)->gsw_bst, (sc)->gsw_bsh, reg, val)
+
 #define	GE_PORT_BASE 0x0000
 
-#define	MDIO_ACCESS	0x00
-#define	    MDIO_CMD_ONGO	(1<<31)
-#define	    MDIO_CMD_WR		(1<<30)
-#define	    MDIO_PHY_ADDR_MASK	0x1f000000
-#define	    MDIO_PHY_ADDR_SHIFT	24
-#define	    MDIO_PHYREG_ADDR_MASK 0x001f0000
-#define	    MDIO_PHYREG_ADDR_SHIFT 16
-#define	    MDIO_PHY_DATA_MASK	0x0000ffff
-#define	    MDIO_PHY_DATA_SHIFT	0
+#define	MDIO_ACCESS		    0x0004
+#define	    MDIO_CMD_ONGO	    (1u << 31)
+#define	    MDIO_CMD_START          (1u << 16)
+#define	    MDIO_CMD_RD		    (2u << 18)
+#define	    MDIO_CMD_WR		    (1u << 18)
+#define	    MDIO_PHY_ADDR_MASK	    0x1f000000
+#define	    MDIO_PHY_ADDR_SHIFT	    20
+#define	    MDIO_PHYREG_ADDR_MASK   0x001f0000
+#define	    MDIO_PHYREG_ADDR_SHIFT  25
+#define	    MDIO_PHY_DATA_MASK	    0x0000ffffUL
+#define	    MDIO_PHY_DATA_SHIFT	    0
 
-#define	FE_GLO_CFG	0x08 /*Frame Engine Global Configuration */
+#define	FE_GLO_CFG	0x08 /* Frame Engine Global Configuration */
 #define	    EXT_VLAN_TYPE_MASK	0xffff0000
 #define	    EXT_VLAN_TYPE_SHIFT	16
 #define	    EXT_VLAN_TYPE_DFLT	0x81000000
